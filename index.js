@@ -35,7 +35,7 @@
 //   resolution layer.
 
 import path from 'node:path'
-import { mkdir } from 'node:fs/promises'
+import { mkdir, readdir } from 'node:fs/promises'
 import _ from 'lodash'
 import { writeTypes } from './src/typegen.js'
 
@@ -65,6 +65,31 @@ export default ({
         return _.get(entity, layoutKey)
     }
 
+    // Load (or reload) a single schema file. Used both for the initial
+    // folder scan in onLoaded and for live onSync CREATE/UPDATE events.
+    // Returns true on successful load (caller can flip `dirty`).
+    async function loadSchemaFile(name, source) {
+        const logger = useLogger()
+        try {
+            const mod = await import(`${source}?stamp=${Date.now()}`)
+            const schema = mod.default
+            if (!schema || typeof schema.safeParse !== 'function') {
+                logger.error(
+                    'Schema %s: default export is not a Zod schema (no safeParse method)',
+                    name,
+                )
+                return false
+            }
+            schemas[name] = { name, schema, source, revision: mod.revision ?? 1 }
+            dirty = true
+            logger.info('Schema loaded: %s', name)
+            return true
+        } catch (err) {
+            logger.error('Schema %s: load failed: %s', name, err.message)
+            return false
+        }
+    }
+
     onLoaded(async () => {
         const logger = useLogger()
         const config = runtime.config.schemas ?? {}
@@ -83,6 +108,20 @@ export default ({
         logger.info('Schemas folder: %s', runtime.options.schemasFolder)
         logger.info('Schemas types:  %s', runtime.options.schemasTypesFile)
 
+        // Initial scan — load every existing schema file. Chokidar (started
+        // by watch() below) defaults to ignoreInitial: true and only runs
+        // in --watch mode at all, so without this loop a cold start would
+        // silently ignore every schema already on disk.
+        const entries = await readdir(runtime.options.schemasFolder, { withFileTypes: true })
+        const schemaFiles = entries
+            .filter(entry => entry.isFile())
+            .filter(entry => entry.name.endsWith('.js') || entry.name.endsWith('.mjs'))
+        for (const entry of schemaFiles) {
+            const name = entry.name.replace(path.extname(entry.name), '')
+            const source = path.join(runtime.options.schemasFolder, entry.name)
+            await loadSchemaFile(name, source)
+        }
+
         watch(collection, runtime.options.schemasFolder)
     })
 
@@ -92,6 +131,10 @@ export default ({
     // `.safeParse()` method is treated as one — we don't `instanceof`
     // ZodType so users can pass a `.refine(...)`/`.transform(...)` chain
     // or even a custom validator with a safeParse-shaped surface).
+    //
+    // onSync fires from chokidar events after the initial scan. Files
+    // already on disk at startup are picked up by the readdir loop in
+    // onLoaded.
     onSync(collection, async ({ action, context }) => {
         if (!context.relativePath) return false
         const { relativePath } = context
@@ -104,22 +147,7 @@ export default ({
         switch (action) {
             case ACTION.CREATE:
             case ACTION.UPDATE: {
-                try {
-                    const mod = await import(`${source}?stamp=${Date.now()}`)
-                    const schema = mod.default
-                    if (!schema || typeof schema.safeParse !== 'function') {
-                        logger.error(
-                            'Schema %s: default export is not a Zod schema (no safeParse method)',
-                            name,
-                        )
-                        return true
-                    }
-                    schemas[name] = { name, schema, source, revision: mod.revision ?? 1 }
-                    dirty = true
-                    logger.info('Schema loaded: %s', name)
-                } catch (err) {
-                    logger.error('Schema %s: load failed: %s', name, err.message)
-                }
+                await loadSchemaFile(name, source)
                 return true
             }
             case ACTION.DELETE: {
