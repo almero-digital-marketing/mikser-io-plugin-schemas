@@ -1,4 +1,4 @@
-// mikser-io-schemas
+// mikser-io-plugin-schemas
 //
 // Zod-backed entity validation for mikser-io. Schemas live as plain .js
 // modules in `schemas/` — one per layout — and validate the `meta`
