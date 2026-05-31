@@ -19,7 +19,7 @@ Add the plugin to your config and pick a folder for schemas (default `schemas/`)
 ```js
 // mikser.config.js
 export default {
-    plugins: ['documents', 'layouts', 'schemas'],
+    plugins: ['documents', 'layouts', 'plugin-schemas'],
 
     schemas: {
         // schemasFolder: 'schemas',       // default
