@@ -25,12 +25,14 @@ export default {
         // schemasFolder: 'schemas',       // default
         // typesFile:     'entities.d.ts', // default — emitted at the project root
         // onError:       'warn',          // 'warn' (default) | 'fail' | 'off'
-        // schemaKey:     'meta.layout',   // default — dotted front-matter path that
-                                           // names the schema to match. SSG projects
-                                           // keep the default; SPA projects (no
-                                           // rendered HTML) typically set this to
-                                           // 'meta.component' since their docs have
-                                           // no layout.
+        schemaKey:        'meta.layout',   // REQUIRED. No default. Dotted front-matter
+                                           // path that names the schema to match.
+                                           // SSG projects typically pass 'meta.layout';
+                                           // SPA projects (no rendered HTML) pass
+                                           // 'meta.component' since their docs have no
+                                           // layout. When unset, validation is off and
+                                           // every loaded schema triggers a finalize
+                                           // warning so the off state is obvious.
     },
 }
 ```
@@ -52,7 +54,10 @@ export default z.object({
 })
 ```
 
-Each entity whose `meta.layout === 'article'` is now validated. The match is by filename stem — `schemas/article.js` matches docs declaring `article`, `schemas/landing-page.js` matches docs declaring `landing-page`, etc. The dispatch front-matter field defaults to `meta.layout` and is configurable via `schemas.schemaKey` — SPA projects typically set it to `'meta.component'`.
+Each entity whose `meta[schemaKey] === 'article'` is now validated. The match is by filename stem — `schemas/article.js` matches docs declaring `article`, `schemas/landing-page.js` matches docs declaring `landing-page`, etc. `schemas.schemaKey` is **required** and has no default — pick the field your project actually uses for dispatch:
+
+- **SSG projects:** `schemaKey: 'meta.layout'` (same field mikser uses for template dispatch)
+- **SPA projects:** `schemaKey: 'meta.component'` (no rendered HTML, no layout)
 
 If a schema file loads but never matches any document during a build, the plugin warns at finalize:
 
@@ -60,7 +65,13 @@ If a schema file loads but never matches any document during a build, the plugin
 WARN  Schema "article" loaded but never matched any entity — check `schemaKey` (currently 'meta.layout') or verify front-matter declares { layout: 'article' }
 ```
 
-That catches the silent-skip failure mode — wrong `schemaKey`, schema named after a value nothing in your front-matter actually declares, or no docs reached the validator at all.
+If `schemaKey` is unset, every loaded schema generates a louder warning pointing at the missing config:
+
+```
+WARN  Schema "article" loaded but `schemas.schemaKey` is not set — validation is off. Set it to the front-matter path that names the schema, e.g. 'meta.layout' (SSG) or 'meta.component' (SPA).
+```
+
+That makes both failure modes — misconfigured key or no key at all — loud at finalize.
 
 ## What validation surfaces
 
@@ -179,8 +190,8 @@ schemas: {
 
     // Dotted path on the entity that holds the layout name. The
     // filename stem of each schema file is matched against this value.
-    // Default 'meta.layout' — matches the standard layouts plugin.
-    // For SPA projects (no rendered HTML), set this to 'meta.component'.
+    // REQUIRED. No default. Pick 'meta.layout' for SSG projects, or
+    // 'meta.component' for SPA projects (no rendered HTML, no layout).
     schemaKey: 'meta.layout',
 }
 ```
@@ -193,7 +204,7 @@ The plugin hooks into:
 |---|---|
 | `onLoaded` | Resolves config paths, ensures `schemasFolder` exists, registers a watcher. |
 | `onSync('schemas', ...)` | Loads / reloads / unloads schema modules as files appear in `schemasFolder`. Cache-busted dynamic import so HMR works. |
-| `onValidate([CREATE, UPDATE], ...)` | Looks up the schema by `entity.meta[schemaKey]` (default `meta.layout`) and runs `.safeParse(entity.meta)`. Returns the error message string in `'warn'` mode, throws in `'fail'` mode. |
+| `onValidate([CREATE, UPDATE], ...)` | Looks up the schema by `entity.meta[schemaKey]` and runs `.safeParse(entity.meta)`. Returns the error message string in `'warn'` mode, throws in `'fail'` mode. Skips silently when `schemaKey` is unset (the finalize warning surfaces the off state). |
 | `onFinalized` | If anything changed in the schemas map this run, re-emits the `.d.ts`. |
 
 No engine changes, no new lifecycle phases — the plugin lives entirely on top of the existing API.

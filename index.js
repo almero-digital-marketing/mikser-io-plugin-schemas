@@ -14,12 +14,18 @@
 //       schemasFolder: 'schemas',        // default
 //       typesFile:     'entities.d.ts',  // emitted at workingFolder root
 //       onError:       'warn',           // 'warn' | 'fail' | 'off'
-//       schemaKey:     'meta.layout',    // dotted front-matter path that
-//                                        // names the schema to validate
-//                                        // against. SSG projects usually
-//                                        // keep the default; SPA projects
-//                                        // typically use 'meta.component'
-//                                        // since their docs have no layout.
+//       schemaKey:     'meta.layout',    // REQUIRED. Dotted front-matter
+//                                        // path that names the schema to
+//                                        // validate against. No default —
+//                                        // pick the field your project
+//                                        // actually uses for dispatch:
+//                                        // SSG projects typically pass
+//                                        // 'meta.layout'; SPA projects
+//                                        // (no rendered HTML, no layout)
+//                                        // typically pass 'meta.component'.
+//                                        // When unset, validation is off
+//                                        // and every loaded schema
+//                                        // triggers a finalize warning.
 //   }
 //
 // Behavior:
@@ -226,13 +232,16 @@ export default ({
         if (mode === 'off') return
 
         // `schemaKey` is the dotted front-matter path that names the
-        // schema to validate against. Default 'meta.layout' covers the
-        // SSG case where mikser also uses the same field for template
-        // dispatch; SPA projects (no rendered HTML) typically set this
-        // to 'meta.component' since their docs have no layout. Anything
-        // else works — e.g. 'meta.type' if your schemas key off a
-        // separate content-type field.
-        const schemaKey = config.schemaKey || 'meta.layout'
+        // schema to validate against. Required — no default. SSG
+        // projects typically pass 'meta.layout' (same field mikser uses
+        // for template dispatch); SPA projects pass 'meta.component'
+        // since their docs have no layout. Anything else works too —
+        // e.g. 'meta.type' if your schemas key off a separate
+        // content-type field. When unset, validation is off; the
+        // finalize hook below warns about every loaded schema so the
+        // off state is loud, not silent.
+        const schemaKey = config.schemaKey
+        if (!schemaKey) return
         const entity = entry.entity
         if (!entity || !entity.meta) return
 
@@ -272,20 +281,27 @@ export default ({
 
         // Unused-schema warning: every loaded schema that never matched
         // an entity during the run is almost certainly a config mistake
-        // — the schemaKey points at a field your front-matter doesn't
-        // set, or a typo in either the schema filename or the dispatch
-        // value, or simply no docs declared themselves. Silent skip
-        // would let a project ship with validation effectively off, so
-        // we surface it at finalize. Skipped when mode is 'off' (the
-        // user opted out of validation entirely).
+        // — schemaKey not set at all, or pointing at a field your
+        // front-matter doesn't declare, or a typo in either the schema
+        // filename or the dispatch value, or simply no docs of that
+        // kind. Silent skip would let a project ship with validation
+        // effectively off, so we surface it at finalize. Suppressed
+        // when mode is 'off' (the user opted out explicitly).
         if (mode !== 'off' && Object.keys(schemas).length > 0) {
-            const schemaKey = config.schemaKey || 'meta.layout'
+            const schemaKey = config.schemaKey
             const unused = Object.keys(schemas).filter(n => !usedSchemas.has(n))
             for (const name of unused) {
-                logger.warn(
-                    'Schema "%s" loaded but never matched any entity — check `schemaKey` (currently \'%s\') or verify front-matter declares { %s: \'%s\' }',
-                    name, schemaKey, schemaKey.replace(/^meta\./, ''), name,
-                )
+                if (!schemaKey) {
+                    logger.warn(
+                        'Schema "%s" loaded but `schemas.schemaKey` is not set — validation is off. Set it to the front-matter path that names the schema, e.g. \'meta.layout\' (SSG) or \'meta.component\' (SPA).',
+                        name,
+                    )
+                } else {
+                    logger.warn(
+                        'Schema "%s" loaded but never matched any entity — check `schemaKey` (currently \'%s\') or verify front-matter declares { %s: \'%s\' }',
+                        name, schemaKey, schemaKey.replace(/^meta\./, ''), name,
+                    )
+                }
             }
         }
 
