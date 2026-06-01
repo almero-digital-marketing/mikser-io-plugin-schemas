@@ -14,7 +14,12 @@
 //       schemasFolder: 'schemas',        // default
 //       typesFile:     'entities.d.ts',  // emitted at workingFolder root
 //       onError:       'warn',           // 'warn' | 'fail' | 'off'
-//       layoutKey:     'meta.layout',    // dotted path to the layout name
+//       schemaKey:     'meta.layout',    // dotted front-matter path that
+//                                        // names the schema to validate
+//                                        // against. SSG projects usually
+//                                        // keep the default; SPA projects
+//                                        // typically use 'meta.component'
+//                                        // since their docs have no layout.
 //   }
 //
 // Behavior:
@@ -95,16 +100,24 @@ export default ({
     const collection = 'schemas'
     const type = 'schema'
 
-    // layout name → { name, schema, source, revision }
+    // schema name → { name, schema, source, revision }
     const schemas = {}
+
+    // Names of schemas that actually matched at least one entity during
+    // the run. Anything in `schemas` but missing from `usedSchemas` at
+    // finalize triggers a warning — catches the silent-skip failure
+    // mode where validation is configured but never runs (wrong
+    // schemaKey, typo, missing front-matter, no docs with that
+    // dispatch token).
+    const usedSchemas = new Set()
 
     // Generated .d.ts gets stamped from a stable journal-of-edits, not
     // wall-clock time — wrote() flips true on any schema-folder sync so
     // onFinalized knows it needs to re-emit.
     let dirty = true
 
-    function getLayout(entity, layoutKey) {
-        return _.get(entity, layoutKey)
+    function getSchemaName(entity, schemaKey) {
+        return _.get(entity, schemaKey)
     }
 
     // Load (or reload) a single schema file. Used both for the initial
@@ -212,15 +225,24 @@ export default ({
         const mode = config.onError ?? 'warn'
         if (mode === 'off') return
 
-        const layoutKey = config.layoutKey || 'meta.layout'
+        // `schemaKey` is the dotted front-matter path that names the
+        // schema to validate against. Default 'meta.layout' covers the
+        // SSG case where mikser also uses the same field for template
+        // dispatch; SPA projects (no rendered HTML) typically set this
+        // to 'meta.component' since their docs have no layout. Anything
+        // else works — e.g. 'meta.type' if your schemas key off a
+        // separate content-type field.
+        const schemaKey = config.schemaKey || 'meta.layout'
         const entity = entry.entity
         if (!entity || !entity.meta) return
 
-        const layout = getLayout(entity, layoutKey)
-        if (!layout) return
+        const schemaName = getSchemaName(entity, schemaKey)
+        if (!schemaName) return
 
-        const definition = schemas[layout]
-        if (!definition) return                 // no schema for this layout — silently skip
+        const definition = schemas[schemaName]
+        if (!definition) return                 // no schema for this name — silently skip
+
+        usedSchemas.add(schemaName)
 
         const result = definition.schema.safeParse(entity.meta, { errorMap: friendlyErrorMap })
         if (result.success) return
@@ -233,7 +255,7 @@ export default ({
         const sourceId = entity.id || '<unknown source>'
         const lines = result.error.issues
             .map(i => `  - ${i.path.join('.') || '<root>'}: ${i.message}`)
-        const message = `schema(${layout}) ${sourceId}:\n${lines.join('\n')}`
+        const message = `schema(${schemaName}) ${sourceId}:\n${lines.join('\n')}`
 
         if (mode === 'fail') {
             throw new Error(message)
@@ -244,8 +266,30 @@ export default ({
     // Regenerate the .d.ts at the end of every build. Idempotent — only
     // rewrites if something actually changed in the schemas map.
     onFinalized(async () => {
-        if (!dirty) return
         const logger = useLogger()
+        const config = runtime.config.schemas ?? {}
+        const mode = config.onError ?? 'warn'
+
+        // Unused-schema warning: every loaded schema that never matched
+        // an entity during the run is almost certainly a config mistake
+        // — the schemaKey points at a field your front-matter doesn't
+        // set, or a typo in either the schema filename or the dispatch
+        // value, or simply no docs declared themselves. Silent skip
+        // would let a project ship with validation effectively off, so
+        // we surface it at finalize. Skipped when mode is 'off' (the
+        // user opted out of validation entirely).
+        if (mode !== 'off' && Object.keys(schemas).length > 0) {
+            const schemaKey = config.schemaKey || 'meta.layout'
+            const unused = Object.keys(schemas).filter(n => !usedSchemas.has(n))
+            for (const name of unused) {
+                logger.warn(
+                    'Schema "%s" loaded but never matched any entity — check `schemaKey` (currently \'%s\') or verify front-matter declares { %s: \'%s\' }',
+                    name, schemaKey, schemaKey.replace(/^meta\./, ''), name,
+                )
+            }
+        }
+
+        if (!dirty) return
         try {
             await writeTypes({
                 schemas,
@@ -253,7 +297,7 @@ export default ({
             })
             dirty = false
             logger.info(
-                'Schemas types emitted: %d layouts → %s',
+                'Schemas types emitted: %d schemas → %s',
                 Object.keys(schemas).length,
                 runtime.options.schemasTypesFile,
             )
