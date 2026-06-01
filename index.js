@@ -39,6 +39,48 @@ import { mkdir, readdir } from 'node:fs/promises'
 import _ from 'lodash'
 import { writeTypes } from './src/typegen.js'
 
+// Friendly per-issue messages — overrides Zod's defaults for the cases
+// where Zod's wording is technically correct but reads awkwardly for
+// people editing markdown. Returning `{ message }` overrides for that
+// issue; falling through to ctx.defaultError keeps Zod's text.
+//
+// String codes (not zod's ZodIssueCode imports) so the plugin keeps
+// zod as a peer dependency with no direct require — every schema
+// already brings its own zod.
+function friendlyErrorMap(issue, ctx) {
+    switch (issue.code) {
+        case 'invalid_type':
+            if (issue.received === 'undefined') return { message: 'is missing' }
+            return { message: `expected ${issue.expected}, got ${issue.received}` }
+        case 'too_small':
+            if (issue.type === 'string') return { message: `is too short (min ${issue.minimum} chars)` }
+            if (issue.type === 'number') return { message: `is too small (min ${issue.minimum})` }
+            if (issue.type === 'array')  return { message: `needs at least ${issue.minimum} item${issue.minimum === 1 ? '' : 's'}` }
+            break
+        case 'too_big':
+            if (issue.type === 'string') return { message: `is too long (max ${issue.maximum} chars)` }
+            if (issue.type === 'number') return { message: `is too large (max ${issue.maximum})` }
+            if (issue.type === 'array')  return { message: `has too many items (max ${issue.maximum})` }
+            break
+        case 'invalid_string':
+            if (issue.validation === 'email') return { message: 'is not a valid email' }
+            if (issue.validation === 'url')   return { message: 'is not a valid URL' }
+            if (issue.validation === 'uuid')  return { message: 'is not a valid UUID' }
+            if (issue.validation === 'regex') return { message: 'does not match the required pattern' }
+            break
+        case 'invalid_enum_value':
+            return { message: `must be one of: ${(issue.options ?? []).join(', ')}` }
+        case 'unrecognized_keys': {
+            const keys = issue.keys ?? []
+            return { message: `unknown field${keys.length === 1 ? '' : 's'}: ${keys.join(', ')}` }
+        }
+        case 'invalid_union':
+        case 'invalid_union_discriminator':
+            return { message: 'does not match any expected shape' }
+    }
+    return { message: ctx.defaultError }
+}
+
 export default ({
     runtime,
     onLoaded,
@@ -180,13 +222,18 @@ export default ({
         const definition = schemas[layout]
         if (!definition) return                 // no schema for this layout — silently skip
 
-        const result = definition.schema.safeParse(entity.meta)
+        const result = definition.schema.safeParse(entity.meta, { errorMap: friendlyErrorMap })
         if (result.success) return
 
-        const issues = result.error.issues
-            .map(i => `${i.path.join('.') || '<root>'}: ${i.message}`)
-            .join('; ')
-        const message = `schema(${layout}) ${issues}`
+        // Multi-line message: one issue per line, source identified up
+        // front. Logs and thrown errors both render this readably; an
+        // editor scanning the log can spot exactly which file + which
+        // field needs attention. Single-line variant felt cramped on
+        // docs with several violations.
+        const sourceId = entity.id || '<unknown source>'
+        const lines = result.error.issues
+            .map(i => `  - ${i.path.join('.') || '<root>'}: ${i.message}`)
+        const message = `schema(${layout}) ${sourceId}:\n${lines.join('\n')}`
 
         if (mode === 'fail') {
             throw new Error(message)
