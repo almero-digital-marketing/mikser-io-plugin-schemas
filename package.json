@@ -1,36 +1,36 @@
 {
-    "name": "mikser-io-plugin-schemas",
-    "version": "0.4.0",
-    "description": "Zod-backed entity validation and TypeScript type generation for mikser-io",
-    "main": "index.js",
-    "type": "module",
-    "files": [
-        "index.js",
-        "src",
-        "README.md",
-        "LICENSE"
-    ],
-    "scripts": {},
-    "repository": {
-        "type": "git",
-        "url": "git+https://github.com/almero-digital-marketing/mikser-io-plugin-schemas.git"
-    },
-    "keywords": [
-        "mikser",
-        "mikser-io",
-        "zod",
-        "schema",
-        "validation",
-        "typescript"
-    ],
-    "author": "",
-    "license": "MIT",
-    "bugs": {
-        "url": "https://github.com/almero-digital-marketing/mikser-io-plugin-schemas/issues"
-    },
-    "homepage": "https://github.com/almero-digital-marketing/mikser-io-plugin-schemas#readme",
-    "peerDependencies": {
-        "mikser-io": "^6.0.0",
-        "zod": "^3.23.0"
-    }
+  "name": "mikser-io-plugin-schemas",
+  "version": "0.5.0",
+  "description": "Zod-backed entity validation and TypeScript type generation for mikser-io",
+  "main": "index.js",
+  "type": "module",
+  "files": [
+    "index.js",
+    "src",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {},
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/almero-digital-marketing/mikser-io-plugin-schemas.git"
+  },
+  "keywords": [
+    "mikser",
+    "mikser-io",
+    "zod",
+    "schema",
+    "validation",
+    "typescript"
+  ],
+  "author": "",
+  "license": "MIT",
+  "bugs": {
+    "url": "https://github.com/almero-digital-marketing/mikser-io-plugin-schemas/issues"
+  },
+  "homepage": "https://github.com/almero-digital-marketing/mikser-io-plugin-schemas#readme",
+  "peerDependencies": {
+    "mikser-io": "^7.0.0",
+    "zod": "^3.23.0"
+  }
 }
