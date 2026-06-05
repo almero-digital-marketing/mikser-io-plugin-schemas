@@ -48,6 +48,7 @@
 import path from 'node:path'
 import { mkdir, readdir } from 'node:fs/promises'
 import _ from 'lodash'
+import { extractRefs, isRefKey, findEntities } from 'mikser-io'
 import { writeTypes } from './src/typegen.js'
 
 // Friendly per-issue messages — overrides Zod's defaults for the cases
@@ -122,8 +123,164 @@ export default ({
     // onFinalized knows it needs to re-emit.
     let dirty = true
 
+    // Reference-validation state. Per ADR-0007 A6 we never error on ref
+    // problems — they're routine mid-edit state (article saved before
+    // its author, entity renamed leaving N referencing entities
+    // temporarily broken). Instead we keep the open issues by entity id
+    // and re-evaluate every cycle, so newly-resolved refs auto-clear and
+    // newly-broken refs surface promptly.
+    //
+    //   pending = Map<entityId, RefIssue[]>
+    //   RefIssue = { kind: 'shape'|'collision'|'missing', path, ...detail }
+    //
+    // Logging is transition-based: a warning fires the first time an
+    // entity's ref-issue set differs from what's already recorded, and
+    // a tidy "cleared" info fires when an entity that previously had
+    // issues comes back clean. Subsequent cycles with the same set are
+    // silent to keep log noise down.
+    const pending = new Map()
+
     function getSchemaName(entity, schemaKey) {
         return _.get(entity, schemaKey)
+    }
+
+    // Walk meta looking for $-keys whose values are neither strings nor
+    // string arrays. Skips array elements that aren't strings — those
+    // produce per-element issues. Only walks plain objects; arrays of
+    // objects are walked too.
+    function findShapeIssues(meta) {
+        const issues = []
+        walk(meta, '')
+        return issues
+
+        function walk(node, prefix) {
+            if (node === null || typeof node !== 'object') return
+            if (Array.isArray(node)) {
+                for (let i = 0; i < node.length; i++) {
+                    walk(node[i], prefix ? `${prefix}.${i}` : String(i))
+                }
+                return
+            }
+            for (const [k, v] of Object.entries(node)) {
+                const here = prefix ? `${prefix}.${k}` : k
+                if (isRefKey(k)) {
+                    if (typeof v === 'string') {
+                        // valid
+                    } else if (Array.isArray(v)) {
+                        const badIdx = v.findIndex(x => typeof x !== 'string')
+                        if (badIdx >= 0) {
+                            issues.push({
+                                kind: 'shape',
+                                path: here,
+                                detail: `array element at index ${badIdx} is not a string`,
+                            })
+                        }
+                    } else {
+                        issues.push({
+                            kind: 'shape',
+                            path: here,
+                            detail: `value must be string or string array, got ${v === null ? 'null' : typeof v}`,
+                        })
+                    }
+                } else {
+                    walk(v, here)
+                }
+            }
+        }
+    }
+
+    // Walk meta looking for collisions — sibling keys where both `key`
+    // and `$key` are declared in the same object. Per ADR-0007 A4 the
+    // $-version wins in the projection deterministically; we surface a
+    // warning so editors know they have orphaned non-ref state.
+    function findCollisionIssues(meta) {
+        const issues = []
+        walk(meta, '')
+        return issues
+
+        function walk(node, prefix) {
+            if (node === null || typeof node !== 'object') return
+            if (Array.isArray(node)) {
+                for (let i = 0; i < node.length; i++) {
+                    walk(node[i], prefix ? `${prefix}.${i}` : String(i))
+                }
+                return
+            }
+            const dollarStems = new Set()
+            const plainKeys   = new Set()
+            for (const k of Object.keys(node)) {
+                if (isRefKey(k)) dollarStems.add(k.slice(1))
+                else plainKeys.add(k)
+            }
+            for (const stem of dollarStems) {
+                if (plainKeys.has(stem)) {
+                    const here = prefix ? `${prefix}.${stem}` : stem
+                    issues.push({
+                        kind: 'collision',
+                        path: here,
+                        detail: `both \`${stem}\` and \`$${stem}\` declared; $-version wins in render`,
+                    })
+                }
+            }
+            for (const [k, v] of Object.entries(node)) {
+                walk(v, prefix ? `${prefix}.${k}` : k)
+            }
+        }
+    }
+
+    // Check whether a ref string resolves to an entity in the catalog.
+    // The convention (ADR-0007 A2) is hrefs — leading slash, no
+    // extension — but the catalog keys entities by id (which for source-
+    // file entities includes the extension). We tolerate both forms so a
+    // ref like `/authors/dick` matches an entity at `/authors/dick.md`.
+    async function refExists(ref) {
+        const matches = await findEntities(e =>
+            !!e && (
+                e.id === ref ||
+                e.meta?.href === ref ||
+                (typeof e.id === 'string' && e.id.replace(/\.[^./]+$/, '') === ref)
+            ),
+        )
+        return matches.length > 0
+    }
+
+    async function validateEntityRefs(entity) {
+        const issues = []
+        if (!entity?.meta || typeof entity.meta !== 'object') return issues
+
+        issues.push(...findShapeIssues(entity.meta))
+        issues.push(...findCollisionIssues(entity.meta))
+
+        // Existence check runs over the valid string refs only — shape
+        // issues already flag the malformed ones, no double-warning.
+        for (const { path: refPath, ref } of extractRefs(entity.meta)) {
+            if (!(await refExists(ref))) {
+                issues.push({ kind: 'missing', path: refPath, ref })
+            }
+        }
+        return issues
+    }
+
+    function formatIssueLine(issue) {
+        switch (issue.kind) {
+            case 'shape':     return `  ${issue.path}: ${issue.detail}`
+            case 'collision': return `  ${issue.path}: ${issue.detail}`
+            case 'missing':   return `  ${issue.path}: reference ${issue.ref} does not resolve`
+            default:          return `  ${issue.path}: ${JSON.stringify(issue)}`
+        }
+    }
+
+    function issueSet(issues) {
+        return new Set(issues.map(i => `${i.kind}:${i.path}:${i.ref ?? ''}:${i.detail ?? ''}`))
+    }
+
+    function issuesEqual(a, b) {
+        if (a.length !== b.length) return false
+        const sa = issueSet(a)
+        for (const k of issueSet(b)) {
+            if (!sa.has(k)) return false
+        }
+        return true
     }
 
     // Load (or reload) a single schema file. Used both for the initial
@@ -223,6 +380,33 @@ export default ({
         return false
     })
 
+    // Reference validation runs in `onFinalized` because that's the
+    // earliest phase where the catalog is fully populated:
+    //
+    //   process    — yaml / front-matter plugins parse `meta`
+    //   processed  — layouts plugin annotates entities
+    //   persist    — entries flow into the catalog (findEntities works
+    //                from here onwards)
+    //   render / postprocess
+    //   finalize  ← here. We can walk findEntities() and resolve refs.
+    //
+    // The earlier `onValidate` hook doesn't work for source documents
+    // because it fires at createEntity time, before front-matter has
+    // populated `meta`. Earlier process-phase hooks see only the current
+    // cycle's mutations through the journal, but ref resolution needs
+    // the *catalog* — which entities currently exist — and that's the
+    // post-persist view.
+    //
+    // Per ADR-0007 A6 ref validation is always WARNINGS, never errors.
+    // `config.onError: 'fail'` does not apply — broken refs are routine
+    // mid-edit state, not unrecoverable failures.
+    //
+    // Logging is transition-based: a warning fires the first time an
+    // entity's issue set appears or changes, and a tidy "cleared" info
+    // fires when an entity that previously had issues comes back clean.
+    // Stable repeats are silent so a single broken ref doesn't flood the
+    // log on every cycle.
+
     // Validate per-entity on CREATE/UPDATE. Returning a string surfaces
     // it as a validator warning via mikser's onValidate semantics;
     // throwing fails the entry. Mode picked from runtime.config.schemas.onError.
@@ -270,6 +454,75 @@ export default ({
             throw new Error(message)
         }
         return message                          // 'warn' — surfaces via mikser's logger
+    })
+
+    onFinalized(async () => {
+        const logger = useLogger()
+        const entities = await findEntities()
+        const stillPresent = new Set()
+        for (const entity of entities) {
+            if (!entity?.id) continue
+            stillPresent.add(entity.id)
+
+            const newIssues = await validateEntityRefs(entity)
+            const oldIssues = pending.get(entity.id) ?? []
+
+            if (!issuesEqual(newIssues, oldIssues)) {
+                if (newIssues.length > 0) {
+                    logger.warn(
+                        'Refs problem: %s\n%s',
+                        entity.id,
+                        newIssues.map(formatIssueLine).join('\n'),
+                    )
+                } else if (oldIssues.length > 0) {
+                    logger.info('Refs cleared: %s', entity.id)
+                }
+            }
+
+            if (newIssues.length > 0) pending.set(entity.id, newIssues)
+            else                       pending.delete(entity.id)
+        }
+        // Drop pending entries for entities that have been deleted from
+        // the catalog — they can't be re-validated, and keeping them in
+        // pending would leak forever.
+        for (const id of [...pending.keys()]) {
+            if (!stillPresent.has(id)) pending.delete(id)
+        }
+    })
+
+    // Expose the current pending-validation list via the MCP substrate so
+    // editors, dashboards, and AI agents can ask "what's currently
+    // broken?" without scraping logs. Read-only snapshot of the in-memory
+    // pending Map.
+    onLoaded(() => {
+        const mcp = runtime.options.mcp
+        if (!mcp) return
+        try {
+            mcp.registerResource(
+                'mikser-schemas-pending',
+                'mikser://schemas/pending',
+                {
+                    title: 'Pending schema-validation issues',
+                    description: 'Per-entity reference issues currently flagged by mikser-io-plugin-schemas — shape problems, collisions, missing targets. Re-evaluated each cycle, so entries clear when their targets appear and new entries surface as references break.',
+                    mimeType: 'application/json',
+                },
+                async (uri) => ({
+                    contents: [{
+                        uri: uri.href,
+                        mimeType: 'application/json',
+                        text: JSON.stringify({
+                            count: pending.size,
+                            entries: Array.from(pending.entries()).map(([id, issues]) => ({
+                                id,
+                                issues: issues.map(i => ({ kind: i.kind, path: i.path, ref: i.ref, detail: i.detail })),
+                            })),
+                        }, null, 2),
+                    }],
+                }),
+            )
+        } catch (err) {
+            useLogger().debug('mikser://schemas/pending registration skipped: %s', err.message)
+        }
     })
 
     // Regenerate the .d.ts at the end of every build. Idempotent — only

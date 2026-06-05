@@ -10,7 +10,7 @@ File-based content is mikser's superpower — but file-based content has no buil
 npm install --save-dev mikser-io-plugin-schemas zod
 ```
 
-`mikser-io ^6` is a peer dependency.
+`mikser-io ^7` is a peer dependency.
 
 ## Quick start
 
@@ -24,15 +24,21 @@ export default {
     schemas: {
         // schemasFolder: 'schemas',       // default
         // typesFile:     'entities.d.ts', // default — emitted at the project root
-        // onError:       'warn',          // 'warn' (default) | 'fail' | 'off'
-        schemaKey:        'meta.layout',   // REQUIRED. No default. Dotted front-matter
-                                           // path that names the schema to match.
+        // onError:       'warn',          // 'warn' (default) | 'fail' | 'off' (schema-shape only)
+        schemaKey:        'meta.layout',   // REQUIRED for schema-shape validation. No
+                                           // default. Dotted front-matter path that
+                                           // names the schema to match.
                                            // SSG projects typically pass 'meta.layout';
                                            // SPA projects (no rendered HTML) pass
                                            // 'meta.component' since their docs have no
-                                           // layout. When unset, validation is off and
-                                           // every loaded schema triggers a finalize
-                                           // warning so the off state is obvious.
+                                           // layout. When unset, schema-shape validation
+                                           // is off and every loaded schema triggers a
+                                           // finalize warning so the off state is loud.
+                                           //
+                                           // Ref validation (per ADR-0007 A6) runs
+                                           // regardless of schemaKey — every $-keyed
+                                           // field is auto-validated for existence,
+                                           // shape, and collision, as warnings.
     },
 }
 ```
@@ -142,27 +148,76 @@ Now `if (entity.layout === 'article')` narrows `entity.meta` to `ArticleMeta` au
 
 ## References between entities
 
-mikser doesn't have a typed reference system — references are plain href strings, resolved at consumption time via `useDocument(id)` / `useHref(ref)` in the SDK. That means a reference field in a schema is just `z.string()`:
+[ADR-0007](https://github.com/almero-digital-marketing/mikser-io/blob/main/documentation/decisions/0007-references-declaration-and-expansion.md) makes references first-class via a tiny naming convention: any meta key starting with `$` is a reference. The value stays a plain string (a leading-slash href, no extension), so `sed`-replace, grep, and YAML/JSON portability are unchanged. What changes is that the engine now *knows* which fields are refs and treats them accordingly — render context normalization strips the `$` so templates see `meta.author` instead of `meta.$author`, the api can `expand` them in a single round-trip, and **this plugin auto-validates that every `$`-keyed value resolves to an actual entity in the catalog**.
+
+```yaml
+---
+layout: article
+title:    Launch
+$author:  /authors/dick           # single ref
+$hero:    /images/launch-hero
+$related:                         # array of refs
+  - /blog/old-post-1
+  - /blog/old-post-2
+seo:
+  $ogImage: /images/og-launch     # nested $-keys also detected
+---
+```
+
+Schema shape for the same article — no special "reference" type, just `z.string()` because that's what's on disk:
 
 ```js
-// schemas/landing.js
 import { z } from 'zod'
 
 export default z.object({
-    layout: z.literal('landing'),
+    layout: z.literal('article'),
     title:  z.string(),
-
-    // Reference to a hero image entity — just a string
-    hero:   z.string(),
-
-    // Reference to articles to feature — array of strings
-    featured: z.array(z.string()).default([]),
+    $author:  z.string(),
+    $hero:    z.string().optional(),
+    $related: z.array(z.string()).default([]),
 })
 ```
 
-This is intentional. Typed reference systems (Sanity's `reference`, Contentful's link types) buy compile-time linking at the cost of coupling the validation layer to the resolution layer. mikser's path is the opposite: keep schemas portable, let `useDocument`/`useHref` handle dereferencing at the point of use. The reference is a string both in JSON, in YAML front-matter, and in the schema — one type, three formats, no glue.
+### Deferred, warning-only ref validation
 
-If you want to validate that a reference *resolves* (i.e., the target entity exists), do it as a `.refine()` against a list you build from `runtime.findEntities()` — but most projects don't bother, because broken references surface immediately the first time the consuming page renders.
+Per ADR-0007 A6, file-based editing is multi-step: an article can be saved before its author file exists, an entity can be renamed leaving N referencing entities temporarily broken, a batch import can land in any order. Any model that errors on broken-ref state at parse time fights normal editing workflows.
+
+This plugin runs ref validation in `onFinalized` (after `onPersist` has populated the catalog) and **emits warnings, never errors**. Four checks run regardless of whether `schemaKey` is set:
+
+- **Shape** — value under a `$`-key isn't a string or string array
+- **Collision** — both `author:` and `$author:` declared in the same entity
+- **Existence** — `$author: /authors/dick` and no entity resolves at that href
+- **Target type** — when typed via `entityRef('author')` (planned), the target's layout doesn't match
+
+Warnings are transition-based: a warning fires the first time an entity's issue set appears or changes; an info fires when an entity that previously had issues comes back clean. Stable repeats are silent so a single broken ref doesn't flood the log every cycle.
+
+```
+WARN  Refs problem: /documents/en/posts/refs-broken.md
+  $author: reference /authors/does-not-exist does not resolve
+```
+
+A pending-validation map keyed by entity id is re-evaluated every cycle — entries whose targets finally appear clear themselves; new failures get added. The current state is exposed via the `mikser://schemas/pending` MCP resource so editors, dashboards, and AI agents can ask "what's currently broken?" without scraping logs.
+
+`onError: 'fail'` in the config applies only to schema-shape mismatches against the Zod schema — never to ref failures, which are always warnings because they are always recoverable through subsequent edits.
+
+### Working with refs from the frontend
+
+References behave differently in three layers per ADR-0007 A3:
+
+| Layer | Shape |
+|---|---|
+| Source files on disk | `$author: /authors/dick` |
+| Catalog (in-memory) | preserved canonical `$`-keys |
+| Templates / render context | normalized — `$` stripped, you do `{{ meta.author }}` |
+| SDK responses | normalized — you read `entity.meta.author` |
+
+So a Vue/React/Svelte component reading `useDocument` always sees `meta.author` as a plain string, regardless of whether the source used `author:` or `$author:`. Existing templates and SDK code keep working unchanged.
+
+To get the resolved entity inline (instead of just the href string) ask the api to `expand` it — see [`mikser-io-sdk-api`](https://github.com/almero-digital-marketing/mikser-io-sdk-api)'s `expand` parameter. One round-trip, full graph context, type-safe via the generated `.d.ts`.
+
+### What about graph-shaped queries?
+
+For "which entities reference this one?", "what does this entity link to?", and atomic rename cascade, the engine maintains an inverse-reference index at `runtime.refs.*`. The same data is exposed via MCP tools (`mikser_refs_inbound`, `_outbound`, `_broken`, `_rename`) and the `mikser://refs/index` resource. The index is engine-level (not a plugin) — see ADR-0006's four-test analysis in ADR-0007 §B9 — so it's always available with no plugin-coordination required. This schemas plugin currently does its own catalog walk for re-evaluation; a future optimisation will use `runtime.refs.inboundFor(ref)` to look up exactly which pending entries are affected when a target appears mid-cycle.
 
 ## Conventions
 
@@ -202,12 +257,14 @@ The plugin hooks into:
 
 | Hook | What it does |
 |---|---|
-| `onLoaded` | Resolves config paths, ensures `schemasFolder` exists, registers a watcher. |
+| `onLoaded` | Resolves config paths, ensures `schemasFolder` exists, registers the schema-folder watcher. Also registers the `mikser://schemas/pending` MCP resource when an MCP substrate is available. |
 | `onSync('schemas', ...)` | Loads / reloads / unloads schema modules as files appear in `schemasFolder`. Cache-busted dynamic import so HMR works. |
-| `onValidate([CREATE, UPDATE], ...)` | Looks up the schema by `entity.meta[schemaKey]` and runs `.safeParse(entity.meta)`. Returns the error message string in `'warn'` mode, throws in `'fail'` mode. Skips silently when `schemaKey` is unset (the finalize warning surfaces the off state). |
-| `onFinalized` | If anything changed in the schemas map this run, re-emits the `.d.ts`. |
+| `onValidate([CREATE, UPDATE], ...)` | Looks up the schema by `entity.meta[schemaKey]` and runs `.safeParse(entity.meta)`. Returns the error message string in `'warn'` mode, throws in `'fail'` mode. Skips silently when `schemaKey` is unset (the finalize warning surfaces the off state). Used for **schema-shape validation only**; ref validation is deferred (see below). |
+| `onFinalized` | Two passes: (1) walks every entity in the catalog and runs ref validation (shape, collision, existence) — see [ADR-0007 A6](https://github.com/almero-digital-marketing/mikser-io/blob/main/documentation/decisions/0007-references-declaration-and-expansion.md). All transitions are logged; stable repeats are silent. (2) If anything changed in the schemas map this run, re-emits the `.d.ts`. |
 
-No engine changes, no new lifecycle phases — the plugin lives entirely on top of the existing API.
+The split between schema validation (`onValidate`, per-entity at create/update) and ref validation (`onFinalized`, full-catalog re-eval per cycle) matches the two failure modes' timing characteristics: schema shape is a property of one entity in isolation; ref resolution depends on the whole catalog's current state, which is only fully visible after `onPersist`.
+
+No engine changes, no new lifecycle phases — the plugin lives entirely on top of the existing engine API.
 
 ## License
 
