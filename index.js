@@ -1,4 +1,4 @@
-// mikser-io-plugin-schemas
+// mikser-io-schemas
 //
 // Zod-backed entity validation for mikser-io. Schemas live as plain .js
 // modules in `schemas/` — one per layout — and validate the `meta`
@@ -503,7 +503,7 @@ export default ({
                 'mikser://schemas/pending',
                 {
                     title: 'Pending schema-validation issues',
-                    description: 'Per-entity reference issues currently flagged by mikser-io-plugin-schemas — shape problems, collisions, missing targets. Re-evaluated each cycle, so entries clear when their targets appear and new entries surface as references break.',
+                    description: 'Per-entity reference issues currently flagged by mikser-io-schemas — shape problems, collisions, missing targets. Re-evaluated each cycle, so entries clear when their targets appear and new entries surface as references break.',
                     mimeType: 'application/json',
                 },
                 async (uri) => ({
