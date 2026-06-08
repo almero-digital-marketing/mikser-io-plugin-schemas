@@ -10,7 +10,7 @@ File-based content is mikser's superpower — but file-based content has no buil
 npm install --save-dev mikser-io-schemas zod
 ```
 
-`mikser-io ^7` is a peer dependency.
+`mikser-io ^8.2.0` is a peer dependency.
 
 ## Quick start
 

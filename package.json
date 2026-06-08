@@ -30,7 +30,7 @@
   },
   "homepage": "https://github.com/almero-digital-marketing/mikser-io-schemas#readme",
   "peerDependencies": {
-    "mikser-io": "^8.0.0",
+    "mikser-io": "^8.2.0",
     "zod": "^4.0.0"
   }
 }
