@@ -18,28 +18,33 @@ Add the plugin to your config and pick a folder for schemas (default `schemas/`)
 
 ```js
 // mikser.config.js
-export default {
-    plugins: ['documents', 'layouts', 'plugin-schemas'],
+import { documents, layouts } from 'mikser-io'
+import { schemas } from 'mikser-io-schemas'
 
-    schemas: {
-        // schemasFolder: 'schemas',       // default
-        // typesFile:     'entities.d.ts', // default — emitted at the project root
-        // onError:       'warn',          // 'warn' (default) | 'fail' | 'off' (schema-shape only)
-        schemaKey:        'meta.layout',   // REQUIRED for schema-shape validation. No
-                                           // default. Dotted front-matter path that
-                                           // names the schema to match.
-                                           // SSG projects typically pass 'meta.layout';
-                                           // SPA projects (no rendered HTML) pass
-                                           // 'meta.component' since their docs have no
-                                           // layout. When unset, schema-shape validation
-                                           // is off and every loaded schema triggers a
-                                           // finalize warning so the off state is loud.
-                                           //
-                                           // Ref validation (per ADR-0007 A6) runs
-                                           // regardless of schemaKey — every $-keyed
-                                           // field is auto-validated for existence,
-                                           // shape, and collision, as warnings.
-    },
+export default {
+    plugins: [
+        documents(),
+        layouts(),
+        schemas({
+            // schemasFolder: 'schemas',       // default
+            // typesFile:     'entities.d.ts', // default — emitted at the project root
+            // onError:       'warn',          // 'warn' (default) | 'fail' | 'off' (schema-shape only)
+            schemaKey:        'meta.layout',   // REQUIRED for schema-shape validation. No
+                                               // default. Dotted front-matter path that
+                                               // names the schema to match.
+                                               // SSG projects typically pass 'meta.layout';
+                                               // SPA projects (no rendered HTML) pass
+                                               // 'meta.component' since their docs have no
+                                               // layout. When unset, schema-shape validation
+                                               // is off and every loaded schema triggers a
+                                               // finalize warning so the off state is loud.
+                                               //
+                                               // Ref validation (per ADR-0007 A6) runs
+                                               // regardless of schemaKey — every $-keyed
+                                               // field is auto-validated for existence,
+                                               // shape, and collision, as warnings.
+        }),
+    ],
 }
 ```
 
