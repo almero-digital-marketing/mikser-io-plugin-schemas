@@ -93,17 +93,18 @@ function friendlyErrorMap(issue, ctx) {
     return { message: ctx.defaultError }
 }
 
-export default ({
-    runtime,
-    onLoaded,
-    onValidate,
-    onFinalized,
-    onSync,
-    watch,
-    useLogger,
-    matchEntity,
-    constants: { OPERATION, ACTION },
-}) => {
+export function schemas(options = {}) {
+    return ({
+        runtime,
+        onLoaded,
+        onValidate,
+        onFinalized,
+        onSync,
+        watch,
+        useLogger,
+        matchEntity,
+        constants: { OPERATION, ACTION },
+    }) => {
     const collection = 'schemas'
     const type = 'schema'
 
@@ -310,7 +311,7 @@ export default ({
 
     onLoaded(async () => {
         const logger = useLogger()
-        const config = runtime.config.schemas ?? {}
+        const config = options
 
         runtime.options.schemas = config.schemasFolder || collection
         runtime.options.schemasFolder = path.join(
@@ -411,7 +412,7 @@ export default ({
     // it as a validator warning via mikser's onValidate semantics;
     // throwing fails the entry. Mode picked from runtime.config.schemas.onError.
     onValidate([OPERATION.CREATE, OPERATION.UPDATE], async entry => {
-        const config = runtime.config.schemas ?? {}
+        const config = options
         const mode = config.onError ?? 'warn'
         if (mode === 'off') return
 
@@ -529,7 +530,7 @@ export default ({
     // rewrites if something actually changed in the schemas map.
     onFinalized(async () => {
         const logger = useLogger()
-        const config = runtime.config.schemas ?? {}
+        const config = options
         const mode = config.onError ?? 'warn'
 
         // Unused-schema warning: every loaded schema that never matched
@@ -576,4 +577,5 @@ export default ({
     })
 
     return { collection, type }
+    }
 }
