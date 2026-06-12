@@ -1,6 +1,6 @@
 {
   "name": "mikser-io-schemas",
-  "version": "0.6.0",
+  "version": "1.0.0",
   "description": "Zod-backed entity validation and TypeScript type generation for mikser-io",
   "main": "index.js",
   "type": "module",
@@ -30,7 +30,7 @@
   },
   "homepage": "https://github.com/almero-digital-marketing/mikser-io-schemas#readme",
   "peerDependencies": {
-    "mikser-io": "^8.2.0",
+    "mikser-io": "^9.0.0",
     "zod": "^4.0.0"
   }
 }
