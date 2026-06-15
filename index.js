@@ -309,14 +309,35 @@ export function schemas(options = {}) {
         }
     }
 
+    // Public surface exposed at `runtime.options.schemas` so consumer
+    // plugins (mikser-io-ocr's name-mode dispatch, future MCP tools,
+    // anything that wants to resolve a schema by its filename stem)
+    // can reach the registered zod objects without importing internals.
+    //
+    // Done at factory-eval time — before any onLoaded fires — so a
+    // later plugin's onLoaded can already see it. Matches the
+    // preview / layouts.inspect convention.
+    runtime.options.schemas = {
+        // Return the registered zod schema for `name`, or undefined.
+        // Lookup is by the filename stem (`schemas/article.js` → 'article').
+        lookup(name) {
+            return schemas[name]?.schema
+        },
+        // List every loaded schema name. Useful for "what schemas are
+        // available" inspection from MCP / debug tooling.
+        names() {
+            return Object.keys(schemas).sort()
+        },
+    }
+
     onLoaded(async () => {
         const logger = useLogger()
         const config = options
 
-        runtime.options.schemas = config.schemasFolder || collection
+        runtime.options.schemasFolderName = config.schemasFolder || collection
         runtime.options.schemasFolder = path.join(
             runtime.options.workingFolder,
-            runtime.options.schemas,
+            runtime.options.schemasFolderName,
         )
         runtime.options.schemasTypesFile = path.join(
             runtime.options.workingFolder,
