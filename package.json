@@ -32,5 +32,8 @@
   "peerDependencies": {
     "mikser-io": "^9.0.0",
     "zod": "^4.0.0"
+  },
+  "devDependencies": {
+    "mikser-io": "file:../mikser-io"
   }
 }
