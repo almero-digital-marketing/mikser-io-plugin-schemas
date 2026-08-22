@@ -48,7 +48,7 @@
 import path from 'node:path'
 import { mkdir, readdir } from 'node:fs/promises'
 import _ from 'lodash'
-import { extractRefs, isRefKey, findEntities } from 'mikser-io'
+import { extractRefs, isRefKey, findEntity, findEntities, refFilter } from 'mikser-io'
 import { writeTypes } from './src/typegen.js'
 
 // Friendly per-issue messages — overrides Zod's defaults for the cases
@@ -230,19 +230,21 @@ export function schemas(options = {}) {
     }
 
     // Check whether a ref string resolves to an entity in the catalog.
-    // The convention (ADR-0007 A2) is hrefs — leading slash, no
-    // extension — but the catalog keys entities by id (which for source-
-    // file entities includes the extension). We tolerate both forms so a
-    // ref like `/authors/dick` matches an entity at `/authors/dick.md`.
+    //
+    // Delegated to core's refFilter rather than spelling the forms out
+    // here. Hand-matching them makes this a second copy of the relation,
+    // and a copy that omits one form reports every ref written in that
+    // form as broken — `meta.url`, the served path (ADR-0011) a
+    // `$hero: /hero.jpg` resolves through, is the one to miss. Under
+    // onError: 'fail' that fails the build on a valid reference.
+    //
+    // refFilter also returns a sift-shaped OBJECT, which matters twice:
+    // it pushes down into the WHERE clause instead of scanning per ref,
+    // and a function filter forces a full scan (mikser-io < 9.19.0
+    // discarded one outright, which made this check answer true for
+    // everything). findEntity stops at the first match.
     async function refExists(ref) {
-        const matches = await findEntities(e =>
-            !!e && (
-                e.id === ref ||
-                e.meta?.href === ref ||
-                (typeof e.id === 'string' && e.id.replace(/\.[^./]+$/, '') === ref)
-            ),
-        )
-        return matches.length > 0
+        return !!(await findEntity(refFilter(ref)))
     }
 
     async function validateEntityRefs(entity) {

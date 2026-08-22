@@ -1,0 +1,215 @@
+// Schema loading and entity validation.
+//
+// The plugin's stated purpose is to be loud when content does not match
+// its schema, so the failure that matters most is validation that
+// silently does not run. The plugin already guards one such case (a
+// schema that matched nothing gets a finalize warning); these tests pin
+// that guard down along with the three onError modes, because "off" and
+// "never ran" look identical from the outside.
+
+import { describe, it } from 'node:test'
+import assert from 'node:assert/strict'
+import { mkdtemp, rm, mkdir, writeFile } from 'node:fs/promises'
+import path from 'node:path'
+
+import { createHarness } from 'mikser-io/testing/harness.js'
+import { schemas } from '../index.js'
+
+const ARTICLE_SCHEMA = `
+import { z } from 'zod'
+export default z.object({
+    layout: z.literal('article'),
+    title:  z.string().min(3),
+    weight: z.number().optional(),
+})
+`
+
+// A working folder with a schemas/ dir, the plugin installed, and
+// onLoaded run so the initial folder scan has happened.
+// The working folder lives INSIDE this package, not in os.tmpdir().
+// Schema files are loaded by dynamic import and they `import { z } from
+// 'zod'`, which only resolves if the file sits somewhere Node can walk
+// up to a node_modules containing zod. From /tmp it cannot, so every
+// schema failed to load and the plugin dutifully reported zero schemas —
+// a fixture problem that looks exactly like a plugin bug.
+async function withPlugin({ schemaFiles = {}, options = {}, entities = [] }, fn) {
+    const root = await mkdtemp(path.join(import.meta.dirname, '.tmp-'))
+    await mkdir(path.join(root, 'schemas'), { recursive: true })
+    for (const [name, body] of Object.entries(schemaFiles)) {
+        await writeFile(path.join(root, 'schemas', name), body)
+    }
+    try {
+        const harness = createHarness({ entities, options: { workingFolder: root } })
+        schemas(options)(harness.core)
+        await harness.runHook('loaded')
+        // Drive the validate hooks the way the engine does: every
+        // registered hook whose operation list covers this entry.
+        harness.validate = async (entry, operation = 'create') => {
+            const results = []
+            for (const { operations, cb } of harness.hooks.validate) {
+                if (!operations || operations.includes(operation)) {
+                    results.push(await cb(entry))
+                }
+            }
+            return results.filter(r => r !== undefined)
+        }
+        return await fn(harness, root)
+    } finally {
+        await rm(root, { recursive: true, force: true })
+    }
+}
+
+const said = (harness, level) =>
+    harness.logs.filter(l => l.level === level).map(l => l.args.join(' ')).join('\n')
+
+describe('schema loading', () => {
+    it('loads a .js schema keyed by its filename stem', async () => {
+        await withPlugin({
+            schemaFiles: { 'article.js': ARTICLE_SCHEMA },
+            options: { schemaKey: 'meta.layout' },
+        }, async (h) => {
+            assert.deepEqual(h.runtime.options.schemas.names(), ['article'])
+            assert.ok(h.runtime.options.schemas.lookup('article'))
+            assert.equal(h.runtime.options.schemas.lookup('nope'), undefined)
+        })
+    })
+
+    it('reports a schema whose default export is not a validator', async () => {
+        await withPlugin({
+            schemaFiles: { 'broken.js': 'export default { not: "a schema" }\n' },
+            options: { schemaKey: 'meta.layout' },
+        }, async (h) => {
+            assert.match(said(h, 'error'), /broken/)
+            assert.deepEqual(h.runtime.options.schemas.names(), [])
+        })
+    })
+
+    it('reports a schema module that throws on import', async () => {
+        await withPlugin({
+            schemaFiles: { 'throws.js': 'throw new Error("boom")\n' },
+            options: { schemaKey: 'meta.layout' },
+        }, async (h) => {
+            assert.match(said(h, 'error'), /throws/)
+            assert.deepEqual(h.runtime.options.schemas.names(), [])
+        })
+    })
+
+    it('ignores non-JS files in the schemas folder', async () => {
+        await withPlugin({
+            schemaFiles: { 'article.js': ARTICLE_SCHEMA, 'notes.md': '# not a schema\n' },
+            options: { schemaKey: 'meta.layout' },
+        }, async (h) => {
+            assert.deepEqual(h.runtime.options.schemas.names(), ['article'])
+        })
+    })
+})
+
+describe('entity validation', () => {
+    const valid = { id: '/documents/a.md', meta: { layout: 'article', title: 'Hello' } }
+    const invalid = { id: '/documents/b.md', meta: { layout: 'article', title: 'no' } }
+
+    it('passes a conforming entity', async () => {
+        await withPlugin({
+            schemaFiles: { 'article.js': ARTICLE_SCHEMA },
+            options: { schemaKey: 'meta.layout' },
+        }, async (h) => {
+            assert.deepEqual(await h.validate({ entity: valid }), [])
+        })
+    })
+
+    it('warns on a non-conforming entity, naming the file and the field', async () => {
+        await withPlugin({
+            schemaFiles: { 'article.js': ARTICLE_SCHEMA },
+            options: { schemaKey: 'meta.layout' },
+        }, async (h) => {
+            const [message] = await h.validate({ entity: invalid })
+            assert.match(message, /\/documents\/b\.md/, 'must name the source')
+            assert.match(message, /title/, 'must name the field')
+        })
+    })
+
+    it('throws under onError: fail', async () => {
+        await withPlugin({
+            schemaFiles: { 'article.js': ARTICLE_SCHEMA },
+            options: { schemaKey: 'meta.layout', onError: 'fail' },
+        }, async (h) => {
+            await assert.rejects(() => h.validate({ entity: invalid }), /title/)
+        })
+    })
+
+    it('validates nothing under onError: off', async () => {
+        await withPlugin({
+            schemaFiles: { 'article.js': ARTICLE_SCHEMA },
+            options: { schemaKey: 'meta.layout', onError: 'off' },
+        }, async (h) => {
+            assert.deepEqual(await h.validate({ entity: invalid }), [])
+        })
+    })
+
+    it('skips an entity whose schema name has no schema', async () => {
+        await withPlugin({
+            schemaFiles: { 'article.js': ARTICLE_SCHEMA },
+            options: { schemaKey: 'meta.layout' },
+        }, async (h) => {
+            const other = { id: '/documents/c.md', meta: { layout: 'gallery', title: 'x' } }
+            assert.deepEqual(await h.validate({ entity: other }), [])
+        })
+    })
+
+    it('honours a schemaKey other than meta.layout', async () => {
+        // SPA projects dispatch on meta.component rather than a layout.
+        const componentSchema = `
+import { z } from 'zod'
+export default z.object({ component: z.literal('Hero'), title: z.string().min(3) })
+`
+        await withPlugin({
+            schemaFiles: { 'Hero.js': componentSchema },
+            options: { schemaKey: 'meta.component' },
+        }, async (h) => {
+            const bad = { id: '/documents/d.md', meta: { component: 'Hero', title: 'x' } }
+            const [message] = await h.validate({ entity: bad })
+            assert.match(message, /title/)
+        })
+    })
+})
+
+describe('the silent-skip guards', () => {
+    it('warns at finalize about a schema that matched nothing', async () => {
+        // The failure this package exists to avoid: validation configured,
+        // wired up, and never actually running — a typo in schemaKey, or
+        // no document carrying that dispatch token.
+        await withPlugin({
+            schemaFiles: { 'article.js': ARTICLE_SCHEMA },
+            options: { schemaKey: 'meta.layout' },
+        }, async (h) => {
+            await h.runHook('finalized')
+            assert.match(said(h, 'warn'), /article/,
+                'a loaded-but-unused schema must be reported')
+        })
+    })
+
+    it('does not warn about a schema that did match', async () => {
+        await withPlugin({
+            schemaFiles: { 'article.js': ARTICLE_SCHEMA },
+            options: { schemaKey: 'meta.layout' },
+        }, async (h) => {
+            await h.validate({ entity: { id: '/documents/a.md', meta: { layout: 'article', title: 'Hello' } } })
+            await h.runHook('finalized')
+            assert.doesNotMatch(said(h, 'warn'), /article/)
+        })
+    })
+
+    it('validation is off with no schemaKey, and says so', async () => {
+        await withPlugin({
+            schemaFiles: { 'article.js': ARTICLE_SCHEMA },
+            options: {},
+        }, async (h) => {
+            const invalid = { id: '/documents/b.md', meta: { layout: 'article', title: 'no' } }
+            assert.deepEqual(await h.validate({ entity: invalid }), [],
+                'no schemaKey means no validation')
+            await h.runHook('finalized')
+            assert.ok(said(h, 'warn').length > 0,
+                'the off state must be loud, not silent')
+        })
+    })
+})

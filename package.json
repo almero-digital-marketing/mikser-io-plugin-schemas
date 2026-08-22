@@ -10,7 +10,9 @@
     "README.md",
     "LICENSE"
   ],
-  "scripts": {},
+  "scripts": {
+    "test": "node --no-warnings --test --test-reporter=spec 'test/**/*.test.js'"
+  },
   "repository": {
     "type": "git",
     "url": "git+https://github.com/almero-digital-marketing/mikser-io-schemas.git"
@@ -29,8 +31,11 @@
     "url": "https://github.com/almero-digital-marketing/mikser-io-schemas/issues"
   },
   "homepage": "https://github.com/almero-digital-marketing/mikser-io-schemas#readme",
+  "dependencies": {
+    "lodash": "^4.18.1"
+  },
   "peerDependencies": {
-    "mikser-io": "^9.0.0",
+    "mikser-io": "^9.19.0",
     "zod": "^4.0.0"
   },
   "devDependencies": {
