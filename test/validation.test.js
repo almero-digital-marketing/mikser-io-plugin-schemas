@@ -213,3 +213,75 @@ describe('the silent-skip guards', () => {
         })
     })
 })
+
+// Validation for documents whose meta arrives LATE.
+//
+// `onValidate` fires at createEntity time, which is before the yaml and
+// front-matter plugins populate `meta`. For a file-based project that is every
+// document, so validation silently did nothing and every schema reported itself
+// as never matched — the plugin was inert for exactly the projects it is for.
+//
+// The catalog holds entities with their meta filled in by `finalized`, so
+// anything the early hook could not see is validated there.
+describe('validation for source documents', () => {
+    const NAV_SCHEMA = `import { z } from 'zod'
+export default z.object({ schema: z.string(), title: z.string(), menuLabel: z.string() })
+`
+    // What the engine hands the early hook for a source document: an entity
+    // that exists but whose meta has not been parsed yet.
+    const bare = { id: '/documents/nav.yml', meta: {} }
+    const filled = (meta) => ({ id: '/documents/nav.yml', collection: 'documents', meta })
+
+    it('validates an entity the early hook could not see', async () => {
+        await withPlugin({
+            schemaFiles: { 'nav.js': NAV_SCHEMA },
+            options: { schemaKey: 'meta.schema' },
+            entities: [filled({ schema: 'nav', title: 'T' })],   // menuLabel missing
+        }, async (h) => {
+            assert.deepEqual(await h.validate({ entity: bare }), [],
+                'nothing to say at createEntity time — meta is empty')
+            await h.runHook('finalized')
+            assert.match(said(h, 'warn'), /schema\(nav\)/)
+            assert.match(said(h, 'warn'), /menuLabel/)
+        })
+    })
+
+    it('stops calling a schema unused when only the late pass matched it', async () => {
+        // The symptom that made this visible: every schema loaded, none matched.
+        await withPlugin({
+            schemaFiles: { 'nav.js': NAV_SCHEMA },
+            options: { schemaKey: 'meta.schema' },
+            entities: [filled({ schema: 'nav', title: 'T', menuLabel: 'M' })],
+        }, async (h) => {
+            await h.runHook('finalized')
+            assert.doesNotMatch(said(h, 'warn'), /never matched/)
+        })
+    })
+
+    it('says nothing about a document that satisfies its schema', async () => {
+        await withPlugin({
+            schemaFiles: { 'nav.js': NAV_SCHEMA },
+            options: { schemaKey: 'meta.schema' },
+            entities: [filled({ schema: 'nav', title: 'T', menuLabel: 'M' })],
+        }, async (h) => {
+            await h.runHook('finalized')
+            assert.doesNotMatch(said(h, 'warn'), /schema\(nav\)/)
+        })
+    })
+
+    it('does not report the same problem twice per entity', async () => {
+        // The early hook still owns entities whose meta IS ready, and the late
+        // pass must not repeat them.
+        await withPlugin({
+            schemaFiles: { 'nav.js': NAV_SCHEMA },
+            options: { schemaKey: 'meta.schema' },
+            entities: [filled({ schema: 'nav', title: 'T' })],
+        }, async (h) => {
+            const early = await h.validate({ entity: filled({ schema: 'nav', title: 'T' }) })
+            assert.equal(early.length, 1, 'a ready entity is still validated early')
+            await h.runHook('finalized')
+            const warned = (said(h, 'warn').match(/schema\(nav\)/g) ?? []).length
+            assert.equal(warned, 0, 'the late pass must not repeat what the early one reported')
+        })
+    })
+})

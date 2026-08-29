@@ -1,6 +1,6 @@
 {
   "name": "mikser-io-schemas",
-  "version": "1.2.1",
+  "version": "1.3.0",
   "description": "Zod-backed entity validation and TypeScript type generation for mikser-io",
   "main": "index.js",
   "type": "module",

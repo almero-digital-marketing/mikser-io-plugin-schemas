@@ -332,6 +332,13 @@ export function schemas(options = {}) {
         },
     }
 
+    // Ids the early hook managed to validate this cycle, so the finalize pass
+    // does not report them a second time. Cleared at the end of each finalize.
+    const validatedEarly = new Set()
+    // Last message per entity, so an unchanged problem is not re-logged every
+    // cycle and a fixed one says so once. Mirrors how ref issues are tracked.
+    const schemaPending = new Map()
+
     onLoaded(async () => {
         const logger = useLogger()
         const config = options
@@ -434,9 +441,40 @@ export function schemas(options = {}) {
     // Validate per-entity on CREATE/UPDATE. Returning a string surfaces
     // it as a validator warning via mikser's onValidate semantics;
     // throwing fails the entry. Mode picked from runtime.config.schemas.onError.
+    // One validation, two callers.
+    //
+    // Returns the message describing what is wrong with `entity`, or null when
+    // it is fine, when nothing names a schema, or when no schema answers to
+    // that name. Marking the schema used is part of the job, so a schema that
+    // only ever matches through the finalize pass is not reported as unused.
+    function schemaIssues(entity) {
+        const schemaKey = options.schemaKey
+        if (!schemaKey) return null
+        if (!entity || !entity.meta) return null
+
+        const schemaName = getSchemaName(entity, schemaKey)
+        if (!schemaName) return null
+
+        const definition = schemas[schemaName]
+        if (!definition) return null            // no schema for this name — silently skip
+
+        usedSchemas.add(schemaName)
+
+        const result = definition.schema.safeParse(entity.meta, { errorMap: friendlyErrorMap })
+        if (result.success) return null
+
+        // Multi-line message: one issue per line, source identified up
+        // front. Logs and thrown errors both render this readably; an
+        // editor scanning the log can spot exactly which file + which
+        // field needs attention.
+        const sourceId = entity.id || '<unknown source>'
+        const lines = result.error.issues
+            .map(i => `  - ${i.path.join('.') || '<root>'}: ${i.message}`)
+        return `schema(${schemaName}) ${sourceId}:\n${lines.join('\n')}`
+    }
+
     onValidate([OPERATION.CREATE, OPERATION.UPDATE], async entry => {
-        const config = options
-        const mode = config.onError ?? 'warn'
+        const mode = options.onError ?? 'warn'
         if (mode === 'off') return
 
         // `schemaKey` is the dotted front-matter path that names the
@@ -448,35 +486,25 @@ export function schemas(options = {}) {
         // content-type field. When unset, validation is off; the
         // finalize hook below warns about every loaded schema so the
         // off state is loud, not silent.
-        const schemaKey = config.schemaKey
-        if (!schemaKey) return
         const entity = entry.entity
-        if (!entity || !entity.meta) return
 
-        const schemaName = getSchemaName(entity, schemaKey)
-        if (!schemaName) return
+        // This hook fires at createEntity time, which is BEFORE the yaml and
+        // front-matter plugins populate `meta`. For a source document that is
+        // every time, so validation used to silently do nothing and every
+        // schema reported itself as never matched — the plugin was inert for
+        // exactly the projects it is written for.
+        //
+        // Entities that DO arrive with meta (created programmatically, or
+        // through a plugin that fills it earlier) are still validated here,
+        // where `fail` can reject the entry before anything renders. The rest
+        // are caught by the finalize pass below, and remembered so they are not
+        // reported twice.
+        if (!entity?.meta || !Object.keys(entity.meta).length) return
+        if (entity.id) validatedEarly.add(entity.id)
 
-        const definition = schemas[schemaName]
-        if (!definition) return                 // no schema for this name — silently skip
-
-        usedSchemas.add(schemaName)
-
-        const result = definition.schema.safeParse(entity.meta, { errorMap: friendlyErrorMap })
-        if (result.success) return
-
-        // Multi-line message: one issue per line, source identified up
-        // front. Logs and thrown errors both render this readably; an
-        // editor scanning the log can spot exactly which file + which
-        // field needs attention. Single-line variant felt cramped on
-        // docs with several violations.
-        const sourceId = entity.id || '<unknown source>'
-        const lines = result.error.issues
-            .map(i => `  - ${i.path.join('.') || '<root>'}: ${i.message}`)
-        const message = `schema(${schemaName}) ${sourceId}:\n${lines.join('\n')}`
-
-        if (mode === 'fail') {
-            throw new Error(message)
-        }
+        const message = schemaIssues(entity)
+        if (!message) return
+        if (mode === 'fail') throw new Error(message)
         return message                          // 'warn' — surfaces via mikser's logger
     })
 
@@ -484,6 +512,36 @@ export function schemas(options = {}) {
         const logger = useLogger()
         const entities = await findEntities()
         const stillPresent = new Set()
+
+        // Schema validation for everything the early hook could not see, which
+        // for a file-based project is all of it: `meta` is populated by the
+        // yaml and front-matter plugins during process, long after
+        // createEntity. Finalize is the first phase where the catalog holds
+        // entities with their meta filled in.
+        //
+        // `fail` cannot reject an entry from here — the render has already
+        // happened — so it fails the CYCLE instead, and it does so after
+        // reporting every offender rather than the first.
+        const mode = options.onError ?? 'warn'
+        const failures = []
+        if (mode !== 'off') {
+            for (const entity of entities) {
+                if (!entity?.id || validatedEarly.has(entity.id)) continue
+                const message = schemaIssues(entity)
+                const previous = schemaPending.get(entity.id) ?? null
+                if (message !== previous) {
+                    if (message) logger.warn('%s', message)
+                    else if (previous) logger.info('Schema OK again: %s', entity.id)
+                }
+                if (message) { schemaPending.set(entity.id, message); failures.push(message) }
+                else schemaPending.delete(entity.id)
+            }
+        }
+        validatedEarly.clear()
+        if (failures.length && mode === 'fail') {
+            throw new Error(`${failures.length} entity/entities failed schema validation`)
+        }
+
         for (const entity of entities) {
             if (!entity?.id) continue
             stillPresent.add(entity.id)
