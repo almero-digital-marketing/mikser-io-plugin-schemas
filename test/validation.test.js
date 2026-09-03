@@ -11,6 +11,7 @@ import { describe, it } from 'node:test'
 import assert from 'node:assert/strict'
 import { mkdtemp, rm, mkdir, writeFile } from 'node:fs/promises'
 import path from 'node:path'
+import { tmpdir } from 'node:os'
 
 import { createHarness } from 'mikser-io/testing/harness.js'
 import { schemas } from '../index.js'
@@ -161,7 +162,6 @@ describe('entity validation', () => {
         // SPA projects dispatch on meta.component rather than a layout.
         const componentSchema = `
 import { z } from 'zod'
-import { useService } from 'mikser-io'
 export default z.object({ component: z.literal('Hero'), title: z.string().min(3) })
 `
         await withPlugin({
@@ -285,5 +285,42 @@ export default z.object({ schema: z.string(), title: z.string(), menuLabel: z.st
             const warned = (said(h, 'warn').match(/schema\(nav\)/g) ?? []).length
             assert.equal(warned, 0, 'the late pass must not repeat what the early one reported')
         })
+    })
+})
+
+describe('where the schemas folder comes from', () => {
+    // The flag could not exist while runtime.options.schemas held the lookup
+    // API: commander names an option after its long flag, so `--schemas`
+    // would have landed a folder string on top of that object after the load
+    // phase, and the failure would have surfaced in whichever consumer read
+    // it next — forms, ocr or layouts, never here.
+    const resolved = async (options, cliValue) => {
+        const root = await mkdtemp(path.join(import.meta.dirname, '.tmp-'))
+        try {
+            const harness = createHarness({
+                options: { workingFolder: root, ...(cliValue ? { schemas: cliValue } : {}) },
+            })
+            schemas(options)(harness.core)
+            await harness.runHook('loaded')
+            return { folder: harness.runtime.options.schemasFolder, root }
+        } finally {
+            await rm(root, { recursive: true, force: true })
+        }
+    }
+
+    it('defaults to the collection name', async () => {
+        const { folder, root } = await resolved({})
+        assert.equal(folder, path.join(root, 'schemas'))
+    })
+
+    it('takes --schemas over the config', async () => {
+        const { folder, root } = await resolved({ schemasFolder: 'from-config' }, 'from-cli')
+        assert.equal(folder, path.join(root, 'from-cli'))
+    })
+
+    it('takes an absolute --schemas as given', async () => {
+        const absolute = path.join(tmpdir(), 'mikser-schemas-absolute')
+        const { folder } = await resolved({}, absolute)
+        assert.equal(folder, absolute)
     })
 })

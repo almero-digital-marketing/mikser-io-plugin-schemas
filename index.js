@@ -49,7 +49,7 @@ import path from 'node:path'
 import { mkdir, readdir } from 'node:fs/promises'
 import _ from 'lodash'
 import { extractRefs, isRefKey, findEntity, findEntities, refFilter, useDatabase,
-         provideService, useService } from 'mikser-io'
+         provideService, useService, cliOption } from 'mikser-io'
 import { writeTypes } from './src/typegen.js'
 
 // Friendly per-issue messages — overrides Zod's defaults for the cases
@@ -321,6 +321,12 @@ export function schemas(options = {}) {
     // onLoaded sees it whatever the plugin order. It used to be assigned to
     // runtime.options.schemas, which coupled every consumer to this package
     // through an object none of them own, and cost `--schemas` its name.
+    // Possible only now that runtime.options.schemas no longer holds the
+    // lookup API: commander names the option after the flag, so this would
+    // have overwritten that object after the load phase.
+    cliOption('--schemas <folder>',
+        'folder holding the schema modules, relative to the working folder (default: schemas)')
+
     provideService('schemas', {
         // Return the registered zod schema for `name`, or undefined.
         // Lookup is by the filename stem (`schemas/article.js` → 'article').
@@ -345,11 +351,17 @@ export function schemas(options = {}) {
         const logger = useLogger()
         const config = options
 
-        runtime.options.schemasFolderName = config.schemasFolder || collection
-        runtime.options.schemasFolder = path.join(
-            runtime.options.workingFolder,
-            runtime.options.schemasFolderName,
-        )
+        // --schemas wins, then the config, then the collection name.
+        //
+        // Read HERE rather than at construction: the option table is not
+        // parsed until every plugin has been constructed, so a value read in
+        // the factory is always undefined. Absolute is taken as given;
+        // anything else is relative to the working folder.
+        runtime.options.schemasFolderName =
+            runtime.options.schemas ?? config.schemasFolder ?? collection
+        runtime.options.schemasFolder = path.isAbsolute(runtime.options.schemasFolderName)
+            ? runtime.options.schemasFolderName
+            : path.join(runtime.options.workingFolder, runtime.options.schemasFolderName)
         runtime.options.schemasTypesFile = path.join(
             runtime.options.workingFolder,
             config.typesFile || 'entities.d.ts',
