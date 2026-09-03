@@ -48,7 +48,7 @@
 import path from 'node:path'
 import { mkdir, readdir } from 'node:fs/promises'
 import _ from 'lodash'
-import { extractRefs, isRefKey, findEntity, findEntities, refFilter } from 'mikser-io'
+import { extractRefs, isRefKey, findEntity, findEntities, refFilter, useDatabase } from 'mikser-io'
 import { writeTypes } from './src/typegen.js'
 
 // Friendly per-issue messages — overrides Zod's defaults for the cases
@@ -461,7 +461,7 @@ export function schemas(options = {}) {
         usedSchemas.add(schemaName)
 
         const result = definition.schema.safeParse(entity.meta, { errorMap: friendlyErrorMap })
-        if (result.success) return null
+        if (result.success) { noteUndeclared(entity, definition, schemaName); return null }
 
         // Multi-line message: one issue per line, source identified up
         // front. Logs and thrown errors both render this readably; an
@@ -471,6 +471,60 @@ export function schemas(options = {}) {
         const lines = result.error.issues
             .map(i => `  - ${i.path.join('.') || '<root>'}: ${i.message}`)
         return `schema(${schemaName}) ${sourceId}:\n${lines.join('\n')}`
+    }
+
+
+    // A key the schema never heard of.
+    //
+    // Zod objects are non-strict by default: an undeclared key is dropped from
+    // `result.data` and the parse SUCCEEDS. Nothing here reads `result.data` — the
+    // entity keeps the key and renders with it — so the whole section exists,
+    // renders, and validates clean while no schema knows its shape. A green that
+    // cannot go red, which is the shape of every silent failure in this stack: the
+    // widened `match` that matched nothing, the forwarded `--clear` that cleared
+    // nothing.
+    //
+    // Warned rather than failed, and outside the `fail` mode deliberately: a
+    // project that has been running with undeclared keys should learn about them,
+    // not have its build stop on the upgrade that added the check. A schema that
+    // wants them rejected can say `.strict()`, which zod already reports as
+    // `unrecognized_keys` and which this never reaches.
+    const undeclared = new Map()
+    
+    // The keys the ENGINE puts in meta, which no schema declares and which are
+    // nobody's mistake.
+    //
+    // Derived from the catalog's own `meta_*` columns rather than written out
+    // here, so a column added to the engine does not turn into a wave of false
+    // warnings in this plugin. `presets` is the one addition that cannot be
+    // derived that way: the assets plugin stamps it onto the source entity
+    // (ADR-0011) and it is not a column.
+    let engineKeys = null
+    function engineOwnedKeys() {
+        if (engineKeys) return engineKeys
+        engineKeys = new Set(['presets'])
+        try {
+            for (const column of useDatabase().handle.prepare('PRAGMA table_info(mikser_entities)').all()) {
+                if (column.name.startsWith('meta_')) engineKeys.add(column.name.slice('meta_'.length))
+            }
+        } catch { /* no database yet — the built-in set still covers the common ones */ }
+        return engineKeys
+    }
+    
+    // `.shape` survives .refine()/.superRefine(); anything that is not an object
+    // schema has none, and is left alone rather than guessed at.
+    function declaredKeys(schema) {
+        const shape = schema?.shape
+        return shape && typeof shape === 'object' ? Object.keys(shape) : null
+    }
+    
+    function noteUndeclared(entity, definition, schemaName) {
+        const declared = declaredKeys(definition.schema)
+        if (!declared) return
+        const owned = engineOwnedKeys()
+        const extra = Object.keys(entity.meta ?? {})
+            .filter(key => !declared.includes(key) && !owned.has(key))
+        if (extra.length) undeclared.set(entity.id, { schemaName, keys: extra })
     }
 
     onValidate([OPERATION.CREATE, OPERATION.UPDATE], async entry => {
@@ -524,6 +578,11 @@ export function schemas(options = {}) {
         // reporting every offender rather than the first.
         const mode = options.onError ?? 'warn'
         const failures = []
+        // Cleared per cycle, and populated by the validation pass below and by
+        // the early hook. Accumulating across a watcher's cycles would report
+        // the same key on every rebuild forever.
+        const carried = new Map(undeclared)
+        undeclared.clear()
         if (mode !== 'off') {
             for (const entity of entities) {
                 if (!entity?.id || validatedEarly.has(entity.id)) continue
@@ -538,6 +597,39 @@ export function schemas(options = {}) {
             }
         }
         validatedEarly.clear()
+        // Undeclared keys, after the validation pass has filled the map.
+        //
+        // Reported before the `fail` throw below so they are still said when a
+        // cycle is about to fail on a real validation error — the two are
+        // usually the same edit, and a key nobody declared is often WHY the
+        // other thing broke.
+        // No `mode` check here: `undeclared` is only ever populated by
+        // schemaIssues, and both of its call sites already return early when
+        // the mode is 'off'. A second guard reads like defence and is
+        // unreachable — a branch no test can distinguish from its absence,
+        // which is the kind of code that later gets trusted for something it
+        // never did.
+        {
+            for (const [id, { schemaName, keys }] of undeclared) carried.set(id, { schemaName, keys })
+            const SHOWN = 10
+            const shown = [...carried].slice(0, SHOWN)
+            for (const [id, { schemaName, keys }] of shown) {
+                logger.warn({ code: 'schema-undeclared-key', id, schema: schemaName, keys },
+                    '%s has %s that schema(%s) does not declare: %s. Zod drops what it does not '
+                    + 'know about and the parse still succeeds, so this validated clean — the field '
+                    + 'exists and renders while nothing knows its shape. Declare it, or say '
+                    + '.strict() on the schema to make it an error.',
+                    id, keys.length === 1 ? 'a field' : 'fields', schemaName, keys.join(', '))
+            }
+            if (carried.size) {
+                logger.warn({ code: 'schema-undeclared-key-summary', entities: carried.size },
+                    '%d entity/entities carry fields no schema declares%s. Engine-stamped keys are '
+                    + 'excluded, so these are all authored.',
+                    carried.size, carried.size > SHOWN ? `, ${SHOWN} shown` : '')
+            }
+        }
+        undeclared.clear()
+
         if (failures.length && mode === 'fail') {
             throw new Error(`${failures.length} entity/entities failed schema validation`)
         }
