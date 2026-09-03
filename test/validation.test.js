@@ -14,6 +14,7 @@ import path from 'node:path'
 
 import { createHarness } from 'mikser-io/testing/harness.js'
 import { schemas } from '../index.js'
+import { useService } from 'mikser-io'
 
 const ARTICLE_SCHEMA = `
 import { z } from 'zod'
@@ -68,9 +69,9 @@ describe('schema loading', () => {
             schemaFiles: { 'article.js': ARTICLE_SCHEMA },
             options: { schemaKey: 'meta.layout' },
         }, async (h) => {
-            assert.deepEqual(h.runtime.options.schemas.names(), ['article'])
-            assert.ok(h.runtime.options.schemas.lookup('article'))
-            assert.equal(h.runtime.options.schemas.lookup('nope'), undefined)
+            assert.deepEqual(useService('schemas').names(), ['article'])
+            assert.ok(useService('schemas').lookup('article'))
+            assert.equal(useService('schemas').lookup('nope'), undefined)
         })
     })
 
@@ -80,7 +81,7 @@ describe('schema loading', () => {
             options: { schemaKey: 'meta.layout' },
         }, async (h) => {
             assert.match(said(h, 'error'), /broken/)
-            assert.deepEqual(h.runtime.options.schemas.names(), [])
+            assert.deepEqual(useService('schemas').names(), [])
         })
     })
 
@@ -90,7 +91,7 @@ describe('schema loading', () => {
             options: { schemaKey: 'meta.layout' },
         }, async (h) => {
             assert.match(said(h, 'error'), /throws/)
-            assert.deepEqual(h.runtime.options.schemas.names(), [])
+            assert.deepEqual(useService('schemas').names(), [])
         })
     })
 
@@ -99,7 +100,7 @@ describe('schema loading', () => {
             schemaFiles: { 'article.js': ARTICLE_SCHEMA, 'notes.md': '# not a schema\n' },
             options: { schemaKey: 'meta.layout' },
         }, async (h) => {
-            assert.deepEqual(h.runtime.options.schemas.names(), ['article'])
+            assert.deepEqual(useService('schemas').names(), ['article'])
         })
     })
 })
@@ -160,6 +161,7 @@ describe('entity validation', () => {
         // SPA projects dispatch on meta.component rather than a layout.
         const componentSchema = `
 import { z } from 'zod'
+import { useService } from 'mikser-io'
 export default z.object({ component: z.literal('Hero'), title: z.string().min(3) })
 `
         await withPlugin({

@@ -48,7 +48,8 @@
 import path from 'node:path'
 import { mkdir, readdir } from 'node:fs/promises'
 import _ from 'lodash'
-import { extractRefs, isRefKey, findEntity, findEntities, refFilter, useDatabase } from 'mikser-io'
+import { extractRefs, isRefKey, findEntity, findEntities, refFilter, useDatabase,
+         provideService, useService } from 'mikser-io'
 import { writeTypes } from './src/typegen.js'
 
 // Friendly per-issue messages — overrides Zod's defaults for the cases
@@ -311,15 +312,16 @@ export function schemas(options = {}) {
         }
     }
 
-    // Public surface exposed at `runtime.options.schemas` so consumer
-    // plugins (mikser-io-ocr's name-mode dispatch, future MCP tools,
-    // anything that wants to resolve a schema by its filename stem)
-    // can reach the registered zod objects without importing internals.
+    // Offered as the `schemas` service so consumer plugins (mikser-io-ocr's
+    // name-mode dispatch, mikser-io-forms' validation, mikser-io-layouts'
+    // check tool) can resolve a schema by its filename stem without
+    // importing internals — and without naming this package.
     //
-    // Done at factory-eval time — before any onLoaded fires — so a
-    // later plugin's onLoaded can already see it. Matches the
-    // preview / layouts.inspect convention.
-    runtime.options.schemas = {
+    // Provided at factory-eval time — before any hook runs — so a consumer's
+    // onLoaded sees it whatever the plugin order. It used to be assigned to
+    // runtime.options.schemas, which coupled every consumer to this package
+    // through an object none of them own, and cost `--schemas` its name.
+    provideService('schemas', {
         // Return the registered zod schema for `name`, or undefined.
         // Lookup is by the filename stem (`schemas/article.js` → 'article').
         lookup(name) {
@@ -330,7 +332,7 @@ export function schemas(options = {}) {
         names() {
             return Object.keys(schemas).sort()
         },
-    }
+    }, { plugin: 'mikser-io-schemas' })
 
     // Ids the early hook managed to validate this cycle, so the finalize pass
     // does not report them a second time. Cleared at the end of each finalize.
@@ -669,7 +671,10 @@ export function schemas(options = {}) {
     // broken?" without scraping logs. Read-only snapshot of the in-memory
     // pending Map.
     onLoaded(() => {
-        const mcp = runtime.options.mcp
+        // A resource, not a tool: core deliberately has no vocabulary for
+        // resources, so this stays MCP's. Asked for from a hook, by which
+        // point every factory has run.
+        const mcp = useService('mcp')
         if (!mcp) return
         try {
             mcp.registerResource(
