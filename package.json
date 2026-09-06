@@ -1,6 +1,6 @@
 {
   "name": "mikser-io-schemas",
-  "version": "2.1.0",
+  "version": "11.0.1",
   "description": "Zod-backed entity validation and TypeScript type generation for mikser-io",
   "main": "index.js",
   "type": "module",
@@ -35,11 +35,11 @@
     "lodash": "^4.18.1"
   },
   "peerDependencies": {
-    "mikser-io": "^10.0.0",
+    "mikser-io": "^11.0.1",
     "zod": "^4.0.0"
   },
   "devDependencies": {
-    "mikser-io": "^10.0.0",
+    "mikser-io": "^11.0.1",
     "zod": "^4.0.0"
   },
   "peerDependenciesMeta": {
