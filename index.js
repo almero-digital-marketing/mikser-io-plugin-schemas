@@ -766,6 +766,6 @@ export function schemas(options = {}) {
         }
     })
 
-    return { collection, type }
+    return { collection, type, module: import.meta.url }
     }
 }
